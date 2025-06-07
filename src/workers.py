@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 from abc import ABC
+from dataclasses import dataclass
 from enum import Enum
 import random
 
-from agent import Agent, AgentBuilder
+from agent import Agent
 from environment import AgentManager
 from households import Household
-from jobs import JobRef, JobBoard
-from skills import Skill, Specialisation, YEARS_TO_SPECIALISE
+from jobs import JobReference, JobDetails, JobBoard
+from skills import Skill, Specialisation, SPECIALISATION_TO_SKILL
+
+
+@dataclass(slots=True, frozen=True)
+class CV:
+    skill: Skill
+    specialisations: list[Specialisation]
 
 
 class AccessMethod(Enum):
@@ -18,7 +25,6 @@ class AccessMethod(Enum):
 
 class BaseWorker(Agent, ABC):
     _household: Household
-    _skill_level: Skill
     _employed: bool = False
     _firm_id: int | None = None
     _job_id: int | None = None
@@ -32,17 +38,11 @@ class BaseWorker(Agent, ABC):
             manager: AgentManager,
             unique_id: int,
             household: Household,
-            skill: Skill,
             reservation_wage
     ):
         super().__init__(manager, unique_id, 'Worker')
         self._household = household
-        self._skill_level = skill
         self._reservation_wage = reservation_wage
-
-    @property
-    def skill(self):
-        return self._skill_level
 
     @property
     def employed(self):
@@ -62,16 +62,11 @@ class BaseWorker(Agent, ABC):
             self._employed = False
             self._reservation_wage = self._wage
 
-    def train(self, skill: Skill) -> None:
-        """Increase the worker's skill level from training received."""
-        if skill > self._skill_level:
-            self._skill_level = skill
-
 
 class JobSearchingWorker(BaseWorker, ABC):
     _job_boards: list[JobBoard]
-    _jobs: dict[JobRef, float]
-    _seen_jobs: set[JobRef]
+    _jobs: dict[JobReference, JobDetails]
+    _seen_jobs: set[JobReference]
     _cached_weights: list[float]
     _search_method: AccessMethod
     _application_method: AccessMethod
@@ -84,7 +79,7 @@ class JobSearchingWorker(BaseWorker, ABC):
     _application_rate: float
     _application_max: int
 
-    def __init__(self, manager, unique_id, household, skill,
+    def __init__(self, manager, unique_id, household,
                  search_method,
                  application_method,
                  reservation_wage,
@@ -95,12 +90,13 @@ class JobSearchingWorker(BaseWorker, ABC):
                  application_rate: float,
                  application_max: int):
 
-        super().__init__(manager, unique_id, household, skill, reservation_wage)
+        super().__init__(manager, unique_id, household, reservation_wage)
         self._job_boards = []
         self._jobs = {}
         self._seen_jobs = set()
         self._cached_weights = []
         self._search_method = search_method
+        self._search_count = 0
         self._application_method = application_method
 
         self._alpha = alpha
@@ -131,7 +127,7 @@ class JobSearchingWorker(BaseWorker, ABC):
             weights = [p/total for p in pops]
         self._cached_weights = weights
 
-    def job_search(self) -> None:
+    def search_for_jobs(self) -> None:
         """Search for a job if any search mechanisms are available."""
         has_boards = bool(self._job_boards)
         has_friends = bool(self._household.friends)
@@ -157,22 +153,21 @@ class JobSearchingWorker(BaseWorker, ABC):
         else:
             self._search_network()
 
-    def job_application(self) -> None:
+    def apply_to_jobs(self) -> None:
         """Apply for jobs if any jobs are available."""
         if random.random() >= self._application_rate:
             return
 
         if list(self._jobs.keys()):
-            self._apply()
+            self._apply_to_job()
 
-    def _add_job(self, firm_id: int, job_id: int, wage_offered: float) -> None:
+    def _add_job(self, job_reference: JobReference, job_details: JobDetails) -> None:
         """Add a job to the application list."""
-        ref = JobRef(firm_id, job_id)
-        if ref not in self._seen_jobs:
-            self._jobs[ref] = wage_offered
-            self._seen_jobs.add(ref)
+        if job_reference not in self._seen_jobs:
+            self._jobs[job_reference] = job_details
+            self._seen_jobs.add(job_reference)
 
-    def _clear_applied(self, refs: list[JobRef]) -> None:
+    def _clear_applied(self, refs: list[JobReference]) -> None:
         """Remove all jobs the worker has applied to."""
         for ref in refs:
             self._seen_jobs.discard(ref)
@@ -180,85 +175,164 @@ class JobSearchingWorker(BaseWorker, ABC):
 
     def _search_board(self, job_board: JobBoard) -> None:
         """Search for jobs on a job board."""
-        search_count = 0
-        jobs = list(job_board.keys())
-        wages = list(job_board.values())
+        self._search_count = 0
+        job_references = list(job_board.keys())
+        job_details = list(job_board.values())
+        wages = [value.satisficing_wage for value in job_details]
 
-        if self._search_method is AccessMethod.Random:
-            perm = random.sample(range(len(jobs)), k=len(jobs))
-        elif self._search_method is AccessMethod.Ordered:
-            perm = sorted(range(len(wages)), key=lambda k: wages[k], reverse=True)
-        else:
-            perm = list(range(len(jobs)))
-
-        for index in perm:
-            if search_count < self._search_max:
-                firm_id = jobs[index].firm_id
-                job_id = jobs[index].job_id
-                wage = wages[index]
-                if wages[index] >= self._reservation_wage:
-                    self._add_job(firm_id, job_id, wage)
-                search_count += 1
-            else:
-                break
+        perm = self._order(job_references, wages)
+        self._search(perm, job_references, job_details)
 
     def _search_network(self) -> None:
         """Search for jobs on the household social network."""
-        search_count = 0
-
+        self._search_count = 0
         for friend_id in self._household.friends:
             friend_household = self._manager.get_agent_by_id(friend_id)
             for worker in friend_household.workers:
-                jobs = worker.jobs.keys()
-                wages = worker.jobs.values()
+                job_references = list(worker.jobs.keys())
+                job_details = list(worker.jobs.values())
+                wages = [value.satisficing_wage for value in job_details]
 
-                if self._search_method is AccessMethod.Random:
-                    perm = random.sample(range(len(jobs)), k=len(jobs))
-                elif self._search_method is AccessMethod.Ordered:
-                    perm = sorted(range(len(wages)), key=lambda k: wages[k], reverse=True)
-                else:
-                    perm = list(range(len(jobs)))
+                perm = self._order(job_references, wages)
+                self._search(perm, job_references, job_details)
 
-                for index in perm:
-                    if search_count < self._search_max:
-                        firm_id = jobs[index].firm_id
-                        job_id = jobs[index].job_id
-                        wage = wages[index]
-                        if wages[index] >= self._reservation_wage:
-                            self._add_job(firm_id, job_id, wage)
-                        search_count += 1
-                    else:
-                        break
+    def _search(self, perm: list[int], job_references: list[JobReference], job_details: list[JobDetails]):
+        for index in perm:
+            if self._search_count < self._search_max:
+                job_reference = job_references[index]
+                job_information = job_details[index]
+                wage = job_information.satisficing_wage
+                if wage >= self._reservation_wage:
+                    self._add_job(job_reference, job_information)
+                self._search_count += 1
+            else:
+                break
 
-    def _apply(self):
+    def _apply_to_job(self):
         """Apply for jobs saved to the application list."""
         applications = 0
         jobs_to_delete = []
-        jobs = list(self._jobs.keys())
 
-        if self._application_method is AccessMethod.Random:
-            perm = random.sample(range(len(self._jobs)), k=len(self._jobs))
-        elif self._application_method is AccessMethod.Ordered:
-            wages = list(self._jobs.values())
-            perm = sorted(range(len(wages)), key=lambda k: wages[k], reverse=True)
-        else:
-            perm = list(range(len(self._jobs)))
+        job_references = list(self._jobs.keys())
+        job_details = list(self._jobs.values())
+        wages = [value.satisficing_wage for value in job_details]
+
+        selection = self._select(job_references, job_details)
+        selected_job_references = [job_references[i] for i in selection]
+        selected_wages = [wages[i] for i in selection]
+
+        perm = self._order(selected_job_references, selected_wages)
 
         for index in perm:
             if applications < self._application_max:
-                firm = self._manager.get_agent_by_id(jobs[index].firm_id)
-                firm.apply(jobs[index].job_id, self.unique_id)
-                jobs_to_delete.append(jobs[index])
+                self._apply(selected_job_references[index], self.unique_id)
+                jobs_to_delete.append(selected_job_references[index])
                 applications += 1
             else:
                 break
 
         self._clear_applied(jobs_to_delete)
 
+    def _apply(self, job_reference: JobReference, worker_id: int):
+        firm = self._manager.get_agent_by_id(job_reference.firm_id)
+        firm.apply(job_reference.job_id, worker_id)
 
-class SpecialisingWorker(BaseWorker, ABC):  # TODO: implement
-    _specialisations: list[Specialisation]
-    _application_history: list
+    @staticmethod
+    def _select(job_references: list[JobReference], job_details: list[JobDetails]) -> list[int]:
+        return list(range(len(job_references)))
 
-    def __init__(self, manager, unique_id, household, skill, reservation_wage):
+    def _order(self, job_references: list[JobReference], wages: list[float]) -> list[int]:
+        if self._search_method is AccessMethod.Random:
+            perm = random.sample(range(len(job_references)), k=len(job_references))
+        elif self._search_method is AccessMethod.Ordered:
+            perm = sorted(range(len(wages)), key=lambda k: wages[k], reverse=True)
+        else:
+            perm = list(range(len(job_references)))
+        return perm
+
+
+class SpecialisingWorker(JobSearchingWorker, ABC):
+    _time_unemployed: int
+    _unemployment_limit: int
+    _is_training: bool
+    _training_rate: float
+    _time_training: int
+    _training_specialisation: Specialisation | None
+    _max_general_skill: Skill
+    _skill_level: Skill
+    _specialisations: set[Specialisation]
+    _search_history: dict[Specialisation: int]
+
+    def __init__(self, manager, unique_id, household, reservation_wage,
+                 training_rate,
+                 max_general_skill,
+                 unemployment_limit,
+                 skill: Skill,
+                 specialisation: Specialisation):
         super().__init__(manager, unique_id, household, skill, reservation_wage)
+        self._time_unemployed = 0
+        self._unemployment_limit = unemployment_limit
+        self._is_training = False
+        self._training_rate: training_rate
+        self._time_training = 0
+        self._training_specialisation = None
+        self._max_general_skill = max_general_skill
+        self._skill_level = skill
+        self._specialisations = {specialisation}
+        self._search_history = {}
+
+    @property
+    def skill(self):
+        return self._skill_level
+
+    @property
+    def specialisations(self):
+        return self._specialisations
+
+    def train(self, specialisation: Specialisation):
+        self._specialisations.add(specialisation)
+        self._skill_level = max(self._skill_level, SPECIALISATION_TO_SKILL(specialisation))
+
+    def start_training(self):
+        if self._search_history and random.random() < self._training_rate:
+            specialisations = list(self._search_history.keys())
+            weights = list(self._search_history.values())
+            self._training_specialisation = random.choices(specialisations, weights=weights, k=1)[0]
+
+            self._search_history = {}
+            self._is_training = True
+            self._time_training = 0
+            self._time_unemployed = 0
+
+    def stop_training(self):
+        self._is_training = False
+
+    def find_training_opportunities(self):
+        if self._jobs:
+            job_references = list(self._jobs.keys())
+            job_details = list(self._jobs.values())
+
+            selected_job_references = [
+                job_references[index] for index in range(len(job_references))
+                if job_details[index].specialisation not in self.specialisations
+                and SPECIALISATION_TO_SKILL[job_details[index].specialisation] > self._max_general_skill
+            ]
+
+            selected_job_details = [
+                job_details[index] for index in range(len(job_details))
+                if job_details[index].specialisation not in self.specialisations
+                and SPECIALISATION_TO_SKILL[job_details[index].specialisation] > self._max_general_skill
+            ]
+
+            for job_detail in selected_job_details:
+                if job_detail.specialisation in self._search_history.keys():
+                    self._search_history[job_detail.specialisation] += 1
+                else:
+                    self._search_history[job_detail.specialisation] = 1
+
+            self._clear_applied(selected_job_references)
+
+    def _select(self, job_references: list[JobReference], job_details: list[JobDetails]) -> list[int]:
+        return [index for index in range(len(job_references))
+                if job_details[index].specialisation in self.specialisations
+                or SPECIALISATION_TO_SKILL[job_details[index].specialisation] <= self._max_general_skill]

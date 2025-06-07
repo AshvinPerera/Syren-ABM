@@ -3,18 +3,34 @@ from __future__ import annotations
 from environment import Environment, AgentManager, AgentScheduler
 from collector import Collector
 from agent import AgentBuilder
-from labour import JobSearchingWorker, SpecialisingWorker
+from workers import SpecialisingWorker
+from skills import YEARS_TO_SPECIALISE
 
 
-class Worker(JobSearchingWorker, SpecialisingWorker):
+class Worker(SpecialisingWorker):
     def step(self, week: bool) -> None:
         """Workers daily and weekly activities."""
         if not self._employed:
             if week:
                 self._reservation_wage = max(self._reservation_wage - self._alpha, 0.0)
 
-            self.job_search()
-            self.job_application()
+            if self._is_training:
+                if self._time_training < YEARS_TO_SPECIALISE[self._training_specialisation] * 365:
+                    self._time_training += 1
+                else:
+                    self.train(self._training_specialisation)
+                    self._is_training = False
+                return
+
+            if self._time_unemployed >= self._unemployment_limit:
+                self.start_training()
+                return
+
+            self.search_for_jobs()
+            self.apply_to_jobs()
+            self.find_training_opportunities()
+
+            self._time_unemployed += 1
 
 
 class WorkerBuilder(AgentBuilder):  # TODO: implement

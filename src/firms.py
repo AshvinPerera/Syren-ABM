@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from agent import Agent, AgentBuilder
 from environment import AgentManager
-from labour import Skill
+from workers import Skill
 
 
 @dataclass(slots=True)
@@ -25,6 +25,9 @@ class Firm(Agent):  # TODO: implement
         super().__init__(manager, unique_id, 'Worker')
 
     def step(self) -> None:
+        pass
+
+    def apply(self, job_id, worker_id, cv=None):
         pass
 
 

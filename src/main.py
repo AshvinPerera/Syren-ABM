@@ -1,4 +1,4 @@
-from market import LabourABM, plot_history
+from labourmarket import LabourABM, plot_history
 
 
 def main() -> None:
