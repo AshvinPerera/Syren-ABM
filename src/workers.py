@@ -1,77 +1,19 @@
 from __future__ import annotations
 
 from abc import ABC
-from enum import Enum, IntEnum
-from dataclasses import dataclass
+from enum import Enum
 import random
 
 from agent import Agent, AgentBuilder
 from environment import AgentManager
-from household import Household
-
-
-class Skill(IntEnum):
-    Professionals = 59
-    Managers = 48
-    TechniciansAndAssociateProfessionals = 37
-    ClericalSupportWorkers = 26
-    ServiceAndSalesWorkers = 25
-    SkilledAgriculturalForestryAndFisheryWorkers = 24
-    CraftAndRelatedTradesWorkers = 23
-    PlantAndMachineOperatorsAndAssemblers = 22
-    ElementaryOccupations = 11
+from households import Household
+from jobs import JobRef, JobBoard
+from skills import Skill, Specialisation, YEARS_TO_SPECIALISE
 
 
 class AccessMethod(Enum):
     Random = 1
     Ordered = 2
-
-
-@dataclass(slots=True, frozen=True)
-class JobRef:
-    """Lightweight, hashable reference to a unique vacancy."""
-    firm_id: int
-    job_id: int
-
-
-class JobBoard:
-    _board: dict[JobRef, float]
-    _popularity: int
-
-    def __init__(self, popularity: int = None):
-        self._board = {}
-        self._popularity = popularity
-
-    def __getitem__(self, name):
-        return self._board[name]
-
-    def __iter__(self):
-        return iter(self._board)
-
-    def keys(self):
-        return self._board.keys()
-
-    def items(self):
-        return self._board.items()
-
-    def values(self):
-        return self._board.values()
-
-    @property
-    def popularity(self):
-        return self._popularity
-
-    @popularity.setter
-    def popularity(self, popularity):
-        self._popularity = popularity
-
-    def register(self, firm_id: int, job_id: int, wage_offered: float) -> None:
-        job = JobRef(firm_id, job_id)
-        self._board[job] = wage_offered
-
-    def deregister(self, firm_id: int, job_id: int) -> None:
-        job = JobRef(firm_id, job_id)
-        self._board.pop(job, None)
 
 
 class BaseWorker(Agent, ABC):
@@ -107,7 +49,7 @@ class BaseWorker(Agent, ABC):
         return self._employed
 
     def employ(self, firm_id: int, job_id: int, wage: float) -> None:
-        """Employs the worker in the firm, if they are currently unemployed."""
+        """Employs the worker in the firm if they are currently unemployed."""
         if not self._employed:
             self._employed = True
             self._firm_id = firm_id
@@ -121,7 +63,7 @@ class BaseWorker(Agent, ABC):
             self._reservation_wage = self._wage
 
     def train(self, skill: Skill) -> None:
-        """Increase the workers skill level from training received."""
+        """Increase the worker's skill level from training received."""
         if skill > self._skill_level:
             self._skill_level = skill
 
@@ -168,8 +110,12 @@ class JobSearchingWorker(BaseWorker, ABC):
         self._application_rate = application_rate
         self._application_max = application_max
 
+    @property
+    def jobs(self):
+        return self._jobs
+
     def add_job_board(self, board: JobBoard):
-        """Adds a job board to the workers list of registered boards."""
+        """Adds a job board to the worker's list of registered boards."""
         if board not in self._job_boards:
             self._job_boards.append(board)
             self.update_board_weights()
@@ -258,7 +204,31 @@ class JobSearchingWorker(BaseWorker, ABC):
 
     def _search_network(self) -> None:
         """Search for jobs on the household social network."""
-        pass  # TODO: implement
+        search_count = 0
+
+        for friend_id in self._household.friends:
+            friend_household = self._manager.get_agent_by_id(friend_id)
+            for worker in friend_household.workers:
+                jobs = worker.jobs.keys()
+                wages = worker.jobs.values()
+
+                if self._search_method is AccessMethod.Random:
+                    perm = random.sample(range(len(jobs)), k=len(jobs))
+                elif self._search_method is AccessMethod.Ordered:
+                    perm = sorted(range(len(wages)), key=lambda k: wages[k], reverse=True)
+                else:
+                    perm = list(range(len(jobs)))
+
+                for index in perm:
+                    if search_count < self._search_max:
+                        firm_id = jobs[index].firm_id
+                        job_id = jobs[index].job_id
+                        wage = wages[index]
+                        if wages[index] >= self._reservation_wage:
+                            self._add_job(firm_id, job_id, wage)
+                        search_count += 1
+                    else:
+                        break
 
     def _apply(self):
         """Apply for jobs saved to the application list."""
@@ -287,21 +257,8 @@ class JobSearchingWorker(BaseWorker, ABC):
 
 
 class SpecialisingWorker(BaseWorker, ABC):  # TODO: implement
-    pass
+    _specialisations: list[Specialisation]
+    _application_history: list
 
-
-class Worker(JobSearchingWorker, SpecialisingWorker):
-    def step(self, week: bool) -> None:
-        """Workers daily and weekly activities."""
-        if not self._employed:
-            if week:
-                self._reservation_wage = max(self._reservation_wage - self._alpha, 0.0)
-
-            self.job_search()
-            self.job_application()
-
-
-class WorkerBuilder(AgentBuilder):  # TODO: implement
-    def __call__(self, manager: AgentManager, unique_id: int, **kwargs):
-        """Creates and returns a worker agent."""
-        pass
+    def __init__(self, manager, unique_id, household, skill, reservation_wage):
+        super().__init__(manager, unique_id, household, skill, reservation_wage)

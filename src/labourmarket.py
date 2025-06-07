@@ -2,6 +2,25 @@ from __future__ import annotations
 
 from environment import Environment, AgentManager, AgentScheduler
 from collector import Collector
+from agent import AgentBuilder
+from labour import JobSearchingWorker, SpecialisingWorker
+
+
+class Worker(JobSearchingWorker, SpecialisingWorker):
+    def step(self, week: bool) -> None:
+        """Workers daily and weekly activities."""
+        if not self._employed:
+            if week:
+                self._reservation_wage = max(self._reservation_wage - self._alpha, 0.0)
+
+            self.job_search()
+            self.job_application()
+
+
+class WorkerBuilder(AgentBuilder):  # TODO: implement
+    def __call__(self, manager: AgentManager, unique_id: int, **kwargs):
+        """Creates and returns a worker agent."""
+        pass
 
 
 class DayScheduler(AgentScheduler):
